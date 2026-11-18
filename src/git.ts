@@ -449,6 +449,17 @@ function readOnePktLine(body: Buffer, off: number): { kind: string; payload: Buf
   return { kind: 'data', payload: body.subarray(off + 4, off + len), next: off + len };
 }
 
+/** Fast-forward check with an O(1) fast path: a push whose new commit directly names the
+ * current tip as a parent is always a fast-forward (the linear-push case, which is every
+ * push of the benchmark's 200-push chain). Anything else falls back to the full
+ * reachability walk. */
+function isFastForward(store: Store, repo: Repo, current: string, newOid: string): boolean {
+  if (current === newOid) return true;
+  const c = store.parseCommitCached(repo, newOid);
+  if (c !== null && c.parents.includes(current)) return true;
+  return store.isAncestor(repo, current, newOid);
+}
+
 /** POST /{owner}/{repo}.git/git-receive-pack. */
 export function handleReceivePack(store: Store, repo: Repo, body: Buffer, res: ServerResponse): void {
   const commands: PushCommand[] = [];
@@ -552,7 +563,7 @@ export function handleReceivePack(store: Store, repo: Repo, body: Buffer, res: S
       results.push({ ref: cmd.ref, ok: false, reason: 'failed' });
       continue;
     }
-    if (current !== ZERO_OID && !store.isAncestor(repo, current, cmd.newOid)) {
+    if (current !== ZERO_OID && !isFastForward(store, repo, current, cmd.newOid)) {
       results.push({ ref: cmd.ref, ok: false, reason: 'non-fast-forward' });
       continue;
     }
