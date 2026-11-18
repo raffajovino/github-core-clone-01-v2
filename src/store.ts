@@ -167,7 +167,7 @@ export class Store {
 
   putObject(repo: Repo, type: GitObjectType, data: Buffer): string {
     const oid = hashObject(type, data);
-    if (!repo.objects.has(oid)) repo.objects.set(oid, { type, data });
+    if (!repo.objects.has(oid)) repo.objects.set(oid, { type, data, oid });
     return oid;
   }
 

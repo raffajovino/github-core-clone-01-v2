@@ -12,6 +12,8 @@ export type GitObjectType = 'commit' | 'tree' | 'blob' | 'tag';
 export interface GitObject {
   type: GitObjectType;
   data: Buffer;
+  /** The object's id when already known (store keys, pack parsing): avoids re-hashing. */
+  oid?: string;
 }
 
 const TYPE_CODES: Record<GitObjectType, number> = { commit: 1, tree: 2, blob: 3, tag: 4 };
@@ -101,11 +103,11 @@ export function decodePktLines(buf: Buffer): Pkt[] {
 
 /** Write a pack (version 2, plain objects, SHA-1 trailer). Objects are sorted for determinism. */
 export function writePack(objects: readonly GitObject[]): Buffer {
-  const sorted = [...objects].sort((a, b) => {
-    const ha = hashObject(a.type, a.data);
-    const hb = hashObject(b.type, b.data);
-    return ha < hb ? -1 : ha > hb ? 1 : 0;
-  });
+  // One hash per object, then sort by the id: the old comparator re-hashed both sides of
+  // every comparison (O(n log n) SHA-1s on a 600-object pack ≈ 2/3 of the build time).
+  const sorted = objects
+    .map((obj) => ({ type: obj.type, data: obj.data, oid: obj.oid ?? hashObject(obj.type, obj.data) }))
+    .sort((a, b) => (a.oid < b.oid ? -1 : a.oid > b.oid ? 1 : 0));
   const parts: Buffer[] = [];
   const head = Buffer.alloc(12);
   head.write('PACK', 0, 'ascii');
@@ -138,10 +140,27 @@ export function writePack(objects: readonly GitObject[]): Buffer {
 }
 
 /**
- * Find the end of one zlib stream starting at `off`: inflateSync ignores trailing bytes and
- * throws on truncation, so the smallest prefix that inflates is the stream end (binary search).
+ * Find the end of one zlib stream starting at `off`.
+ * Fast path: a deflate stream holding `size` bytes is at most size + 11 bytes long (stored
+ * blocks cost 5 bytes per 64 KiB, plus 2 header + 4 adler), so a slice of size + 32 always
+ * contains the whole stream. Inflate it, re-deflate the result (zlib's deflate is
+ * deterministic for the same input and level), and the re-deflated length is the exact end —
+ * verified byte-for-byte against the slice, so a compressor that disagrees falls through to
+ * the binary search instead of ever returning a wrong end. ~2 zlib calls per object instead
+ * of ~log2(range) ≈ 11 binary-search inflates.
  */
-function zlibStreamEnd(buf: Buffer, off: number, maxEnd: number): number {
+function zlibStreamEnd(buf: Buffer, off: number, maxEnd: number, size: number): number {
+  const cap = Math.min(maxEnd, off + size + 32);
+  try {
+    const data = inflateSync(buf.subarray(off, cap));
+    if (data.length === size) {
+      const comp = deflateSync(data);
+      const end = off + comp.length;
+      if (end <= maxEnd && buf.subarray(off, end).equals(comp)) return end;
+    }
+  } catch {
+    // Slice too short for this compressor, or not a stream at all: binary-search below.
+  }
   let lo = off;
   let hi = maxEnd;
   while (lo < hi) {
@@ -194,12 +213,12 @@ export function readPack(buf: Buffer): ParsedPack {
     }
     const type = CODE_TYPES[typeCode];
     if (type === undefined) throw new Error(`unsupported pack object type ${typeCode} (deltas are not accepted)`);
-    const end = zlibStreamEnd(buf, off, trailerAt);
+    const end = zlibStreamEnd(buf, off, trailerAt, size);
     const data = inflateSync(buf.subarray(off, end));
     if (data.length !== size) throw new Error(`pack object size mismatch: header ${size}, inflated ${data.length}`);
     off = end;
     const oid = hashObject(type, data);
-    objects.set(oid, { type, data });
+    objects.set(oid, { type, data, oid });
   }
   return { version, objects, deltaCount: 0 };
 }
