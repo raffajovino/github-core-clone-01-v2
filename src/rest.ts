@@ -109,7 +109,9 @@ function commitJson(store: Store, repo: Repo, oid: string): Record<string, unkno
   };
   return {
     sha: oid,
-    commit: { message: c.message, author: ident(c.author), committer: ident(c.committer) },
+    // GitHub presents the commit message without the trailing newline the raw
+    // commit object carries (makeCommit appends one, as git does).
+    commit: { message: c.message.replace(/\n+$/, ''), author: ident(c.author), committer: ident(c.committer) },
     author: { login: VIEWER_LOGIN, id: VIEWER_ID, type: 'User' },
     committer: { login: VIEWER_LOGIN, id: VIEWER_ID, type: 'User' },
     parents: c.parents.map((p) => ({ sha: p })),
